@@ -1,0 +1,29 @@
+{
+  "model": "SVM",
+  "letters": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "y"
+  ],
+  "feature": "landmarks scaled by aspect, wrist at origin, divided by wrist-to-point-9 distance"
+}

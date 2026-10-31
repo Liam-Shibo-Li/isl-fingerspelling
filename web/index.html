@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISL Fingerspelling - Prototype 1</title>
+<style>
+  body {
+    margin: 0;
+    background: #fafafa;
+    color: #222;
+    font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 15px;
+  }
+  .topbar {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 12px 24px;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+  }
+  .topbar strong { font-size: 16px; }
+  .topbar span { color: #777; font-size: 13px; }
+
+  main {
+    display: flex; flex-wrap: wrap; gap: 24px;
+    padding: 24px;
+    max-width: 1100px;
+  }
+  .left { flex: 1 1 560px; }
+  .right { flex: 0 1 280px; }
+
+  .video-box {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: #1b1b1b;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  video, canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);           /* mirror the view */
+  }
+  #placeholder {
+    position: absolute; top: 50%; left: 0; right: 0;
+    margin: 0; text-align: center; color: #999;
+    transform: translateY(-50%);
+  }
+
+  .controls { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  button {
+    font: inherit;
+    padding: 6px 14px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #f0f0f0; }
+  button:disabled { color: #aaa; border-color: #ddd; cursor: default; }
+  #startBtn:not(:disabled) { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
+  #startBtn:not(:disabled):hover { background: #245a93; }
+  #status { color: #666; font-size: 14px; margin-left: 6px; }
+
+  .box {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .box h2 {
+    margin: 0 0 10px;
+    font-size: 13px; font-weight: 600;
+    color: #555;
+  }
+  #letter { font-size: 96px; font-weight: 700; line-height: 1; margin: 4px 0 8px; }
+  #letter.unsure { color: #bbb; }
+  #confText { margin: 0; color: #444; }
+  #others { margin: 10px 0 0; padding: 10px 0 0; border-top: 1px dashed #ddd; list-style: none; color: #666; font-size: 14px; }
+  #others li { display: flex; justify-content: space-between; padding: 2px 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 4px 0; border-bottom: 1px solid #eee; }
+  td:last-child { text-align: right; font-family: ui-monospace, Menlo, monospace; }
+  tr:last-child td { border-bottom: 0; }
+
+  .note { color: #777; font-size: 13px; line-height: 1.5; margin: 0; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <strong>ISL Fingerspelling Tutor</strong>
+  <span>Prototype 1: webcam + letter recognition</span>
+</div>
+
+<main>
+  <div class="left">
+    <div class="video-box">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <p id="placeholder">Camera off</p>
+    </div>
+    <div class="controls">
+      <button id="startBtn" disabled>Start camera</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <span id="status">Loading models...</span>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="box">
+      <h2>Recognised letter</h2>
+      <div id="letter">-</div>
+      <p id="confText">Confidence: -</p>
+      <ul id="others"></ul>
+    </div>
+
+    <div class="box">
+      <h2>Details</h2>
+      <table>
+        <tr><td>Classifier</td><td id="modelName">-</td></tr>
+        <tr><td>Hand</td><td id="hand">-</td></tr>
+        <tr><td>Tracking score</td><td id="track">-</td></tr>
+        <tr><td>FPS</td><td id="fps">-</td></tr>
+      </table>
+    </div>
+
+    <p class="note">Use your right hand. Only the 23 static letters are supported; J, X and Z need movement and are not included yet. The video stays in the browser and is not uploaded.</p>
+  </div>
+</main>
+
+<!-- ONNX Runtime Web: runs the trained classifier in the browser -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+
+<script type="module">
+  import { HandLandmarker, FilesetResolver, DrawingUtils }
+    from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+  const WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+  const MODEL_PATH = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+  const SMOOTHING = 8;          // average the classifier output over the last 8 frames
+  const SURE = 0.6;             // below this confidence the letter is shown in grey
+
+  const $ = (id) => document.getElementById(id);
+  const video = $("video"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+  const drawer = new DrawingUtils(ctx);
+  const startBtn = $("startBtn"), stopBtn = $("stopBtn"), statusEl = $("status"), placeholder = $("placeholder");
+  const letterEl = $("letter"), confText = $("confText"), othersEl = $("others");
+  const handEl = $("hand"), trackEl = $("track"), fpsEl = $("fps"), modelEl = $("modelName");
+
+  let handLandmarker = null, session = null, letters = [];
+  let stream = null, running = false, lastVideoTime = -1;
+  let frames = 0, fpsTimer = performance.now();
+  let history = [], busy = false;
+
+  // 1a. Load the MediaPipe hand landmark model (GPU first, CPU as fallback)
+  async function loadHandModel() {
+    const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+      runningMode: "VIDEO",
+      numHands: 1
+    });
+    try {
+      handLandmarker = await HandLandmarker.createFromOptions(vision, options("GPU"));
+    } catch {
+      handLandmarker = await HandLandmarker.createFromOptions(vision, options("CPU"));
+    }
+  }
+
+  // 1b. Load the trained letter classifier (exported from Python as ONNX)
+  async function loadClassifier() {
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+    ort.env.wasm.numThreads = 1;
+    const [s, meta] = await Promise.all([
+      ort.InferenceSession.create("model/letter_classifier.onnx", { executionProviders: ["wasm"] }),
+      fetch("model/labels.json").then((r) => r.json())
+    ]);
+    session = s;
+    letters = meta.letters;
+    modelEl.textContent = meta.model;
+  }
+
+  Promise.all([loadHandModel(), loadClassifier()])
+    .then(() => { statusEl.textContent = "Ready"; startBtn.disabled = false; })
+    .catch((err) => {
+      console.error(err);
+      statusEl.textContent = "Model failed to load (is the model folder next to this page?)";
+    });
+
+  // 2. Same feature steps as normalise() in train_classifier.py:
+  //    correct for image shape, move the wrist to the origin, divide by palm size
+  function toFeatures(landmarks, aspect) {
+    const p = landmarks.map((pt) => [pt.x * aspect, pt.y, pt.z]);
+    const [wx, wy, wz] = p[0];
+    for (const q of p) { q[0] -= wx; q[1] -= wy; q[2] -= wz; }
+    const palm = Math.hypot(p[9][0], p[9][1]) || 1e-6;
+    const f = new Float32Array(63);
+    p.forEach((q, i) => { f[i * 3] = q[0] / palm; f[i * 3 + 1] = q[1] / palm; f[i * 3 + 2] = q[2] / palm; });
+    return f;
+  }
+
+  // 3. Run the classifier and smooth the result over recent frames
+  async function classify(features) {
+    const input = new ort.Tensor("float32", features, [1, 63]);
+    const out = await session.run({ [session.inputNames[0]]: input });
+    const probs = (out.probabilities || out[session.outputNames[1]]).data;
+
+    history.push(Float32Array.from(probs));
+    if (history.length > SMOOTHING) history.shift();
+    const avg = new Float32Array(letters.length);
+    for (const h of history) h.forEach((v, i) => { avg[i] += v / history.length; });
+
+    const ranked = [...avg].map((p, i) => ({ letter: letters[i].toUpperCase(), p }))
+                           .sort((a, b) => b.p - a.p);
+    showPrediction(ranked);
+  }
+
+  function showPrediction(ranked) {
+    const top = ranked[0];
+    letterEl.textContent = top.letter;
+    letterEl.classList.toggle("unsure", top.p < SURE);
+    confText.textContent = "Confidence: " + Math.round(top.p * 100) + "%";
+    othersEl.innerHTML = ranked.slice(1, 4)
+      .map((r) => `<li><span>${r.letter}</span><span>${Math.round(r.p * 100)}%</span></li>`)
+      .join("");
+  }
+
+  function clearPrediction() {
+    history = [];
+    letterEl.textContent = "-";
+    letterEl.classList.remove("unsure");
+    confText.textContent = "Confidence: -";
+    othersEl.innerHTML = "";
+  }
+
+  // 4. Start and stop the webcam
+  startBtn.addEventListener("click", async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      video.srcObject = stream;
+      await video.play();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      placeholder.hidden = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusEl.textContent = "Running";
+      running = true;
+      requestAnimationFrame(loop);
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = err.name === "NotAllowedError"
+        ? "Camera access blocked - allow it in the browser settings"
+        : "Camera could not start";
+    }
+  });
+
+  stopBtn.addEventListener("click", () => {
+    running = false;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    video.srcObject = null;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    placeholder.hidden = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    statusEl.textContent = "Stopped";
+    handEl.textContent = trackEl.textContent = fpsEl.textContent = "-";
+    clearPrediction();
+  });
+
+  // 5. For each new video frame: find the hand, draw it, and recognise the letter
+  function loop() {
+    if (!running) return;
+    if (video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+      const result = handLandmarker.detectForVideo(video, performance.now());
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (result.landmarks.length > 0) {
+        const landmarks = result.landmarks[0];
+        drawer.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: "#00c853", lineWidth: 3 });
+        drawer.drawLandmarks(landmarks, { color: "#ff3d00", lineWidth: 1, radius: 3 });
+
+        const h = result.handedness[0][0];
+        handEl.textContent = h.categoryName;
+        trackEl.textContent = Math.round(h.score * 100) + "%";
+
+        if (!busy) {                                   // skip a frame if the last one is still being classified
+          busy = true;
+          const features = toFeatures(landmarks, video.videoWidth / video.videoHeight);
+          classify(features).catch(console.error).finally(() => { busy = false; });
+        }
+      } else {
+        handEl.textContent = "none";
+        trackEl.textContent = "-";
+        clearPrediction();
+      }
+
+      frames++;
+      const now = performance.now();
+      if (now - fpsTimer >= 1000) {
+        fpsEl.textContent = Math.round((frames * 1000) / (now - fpsTimer));
+        frames = 0;
+        fpsTimer = now;
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Dataset and downloaded model (too big, and the dataset is not mine to share)
+data/
+ml/models/
+*.mov
+*.mp4
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Mac
+.DS_Store
